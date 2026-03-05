@@ -1,0 +1,23 @@
+[
+  {
+    "question": "Acinetobacter lwoffii has been evolved in the lab to be resistant to which antibiotic?",
+    "answer": "ciprofloxacin",
+    "source_doi": "https://doi.org/10.1128/msphere.00109-24",
+    "key_passage": "A. baumannii readily evolved resistance to meropenem, ciprofloxacin, and gentamicin, but A. lwoffii only evolved resistance to ciprofloxacin",
+    "domain": "Molecular biology / Genomics"
+  },
+  {
+    "question": "By what fold change do active olfactory receptor genes increase their contacts with Greek Island regions in mouse olfactory neurons?",
+    "answer": "2.7 fold",
+    "source_doi": "https://doi.org/10.1038/s41586-023-06845-4",
+    "key_passage": "Furthermore, total contacts made to GIs showed that whereas the active OR gene significantly increased its contacts to GIs by 2.7-fold, both inactive OR genes and other",
+    "domain": "Neuroscience"
+  },
+  {
+    "question": "Among Cas9-disrupted loci in human neural stem cells, what percentage of disruption phenotypes were apparent after 4 cell divisions?",
+    "answer": "61% of gene loci",
+    "source_doi": "https://doi.org/10.1016/j.celrep.2024.113693",
+    "key_passage": "The majority of gene disruption phenotypes (61% of total gene phenotypes) were detected by 4 cell divisions. In contrast, fewer enhancer disruption phenotypes (30% of all conserved-region phenotypes) were detected at this early time point. The total number of phenotypes within enhancers approximately doubled at 8 cell divisions and doubled again at 12 cell divisions",
+    "domain": "Molecular biology / Genomics"
+  }
+]
