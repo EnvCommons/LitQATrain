@@ -96,6 +96,6 @@ This environment is inspired by LitQA2 from [FutureHouse's LAB-Bench](https://gi
   title     = {LitQATrain},
   year      = {2026},
   publisher = {OpenReward},
-  url       = {https://openreward.ai/EnvCommons/litqatrain}
+  url       = {https://openreward.ai/GeneralReasoning/litqatrain}
 }
 ```
