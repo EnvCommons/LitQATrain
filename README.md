@@ -4,7 +4,7 @@
 
 ## Description
 
-LitQATrain is an environment for evaluating scientific literature question answering with web search capabilities, inspired by FutureHouse's [LitQA2](https://github.com/Future-House/LitQA) benchmark. Like LitQA2, each question asks about a specific verifiable fact found in a particular scientific paper, and is designed to be specific enough that it can only be answered from a single source. LitQATrain extends this approach to 984 QA pairs across 10 broad scientific domains, with open-ended (non-multiple-choice) answers and web search tools for retrieval.
+LitQATrain is an ORS environment for evaluating scientific literature question answering with web search capabilities, inspired by FutureHouse's [LitQA2](https://github.com/Future-House/LitQA) benchmark. Like LitQA2, each question asks about a specific verifiable fact found in a particular scientific paper, and is designed to be specific enough that it can only be answered from a single source. LitQATrain extends this approach to 984 QA pairs across 10 broad scientific domains, with open-ended (non-multiple-choice) answers and web search tools for retrieval.
 
 ## Capabilities
 
