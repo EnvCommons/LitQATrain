@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import openai
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tavily import AsyncTavilyClient
 
 from openreward.environments import Environment, JSONObject, TextBlock, ToolOutput, tool
@@ -48,6 +48,7 @@ class WebSearchInput(BaseModel):
 
 class FetchUrlInput(BaseModel):
     url: str
+    page: int = Field(default=1, description="Page number to retrieve (1-indexed). Each page contains ~10,000 characters of the document; use higher pages to read further into a long paper.")
 
 
 class SubmitAnswerInput(BaseModel):
@@ -168,31 +169,77 @@ When you have your answer, submit it using the submit_answer tool."""
         """
         Fetch and return the full text content from a specific URL using Tavily's extract method.
         Use this after web_search to get complete information from a page.
+        Content is paginated - use the page parameter to retrieve additional pages.
         """
+        PAGE_SIZE = 10000  # Characters per page
+
         try:
-            response = await self.tavily_client.extract(urls=[params.url])
+            response = await self.tavily_client.extract(
+                urls=[params.url],
+                extract_depth="advanced",
+                format="text",
+            )
 
             results = response.get("results", [])
             if not results:
                 return ToolOutput(
-                    blocks=[TextBlock(text=f"No content extracted from {params.url}")],
+                    blocks=[TextBlock(text=(
+                        f"Could not fetch {params.url}: the extractor returned "
+                        f"no result. The URL may be unreachable, blocked, or "
+                        f"invalid. Try a different source, the publisher's "
+                        f"full-text page, or the arXiv HTML version "
+                        f"(arxiv.org/html/<id> rather than /abs/<id>)."
+                    ))],
                     metadata={"url": params.url, "results": []},
                     reward=0.0,
                     finished=False,
                 )
 
-            result = results[0]
-            raw_content = result.get("raw_content", "")
+            raw_content = results[0].get("raw_content", "") or ""
+            if not raw_content.strip():
+                return ToolOutput(
+                    blocks=[TextBlock(text=(
+                        f"No readable text could be extracted from {params.url}. "
+                        f"The page appears to be JavaScript-gated (e.g. an arXiv "
+                        f"/abs/ abstract page or a paywalled publisher page) or "
+                        f"otherwise served no content to the extractor. Try the "
+                        f"article's full-text HTML version (e.g. arxiv.org/html/<id> "
+                        f"instead of /abs/<id>), an open-access mirror, or a "
+                        f"different source."
+                    ))],
+                    metadata={"url": params.url, "results": results, "empty_content": True},
+                    reward=0.0,
+                    finished=False,
+                )
 
-            max_length = 8000
-            if len(raw_content) > max_length:
-                raw_content = raw_content[:max_length] + "...\n[Content truncated]"
+            total_length = len(raw_content)
+
+            # Calculate pagination
+            total_pages = max(1, (total_length + PAGE_SIZE - 1) // PAGE_SIZE)
+            page = max(1, min(params.page, total_pages))
+
+            # Extract the requested page
+            start_idx = (page - 1) * PAGE_SIZE
+            end_idx = min(start_idx + PAGE_SIZE, total_length)
+            page_content = raw_content[start_idx:end_idx]
+
+            # Build display text with pagination info
+            if total_pages == 1:
+                display_text = f"Content from {params.url}:\n\n{page_content}"
+            else:
+                display_text = f"Content from {params.url} (Page {page}/{total_pages}):\n\n{page_content}"
+                if page < total_pages:
+                    display_text += f"\n\n[Use fetch_url with page={page + 1} to see more content]"
 
             return ToolOutput(
-                blocks=[TextBlock(text=f"Content from {params.url}:\n\n{raw_content}")],
+                blocks=[TextBlock(text=display_text)],
                 metadata={
                     "url": params.url,
-                    "length": len(raw_content),
+                    "page": page,
+                    "total_pages": total_pages,
+                    "total_length": total_length,
+                    "page_start": start_idx,
+                    "page_end": end_idx,
                 },
                 reward=0.0,
                 finished=False,
