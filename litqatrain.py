@@ -117,54 +117,74 @@ When you have your answer, submit it using the submit_answer tool."""
 
         return [TextBlock(text=prompt_text)]
 
+    async def _tavily_with_retry(self, label: str, call, *, max_attempts: int = 4):
+        """Call Tavily with exponential backoff, then re-raise on persistent failure.
+
+        A transient blip recovers within the retries; a genuinely-down dependency
+        (exhausted quota, auth error) exhausts them and re-raises, so the SDK turns
+        it into ToolFailed -> a clean terminal instead of the agent looping forever
+        on a dead search backend. `call` is a zero-arg callable that returns a fresh
+        awaitable on each attempt.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                return await call()
+            except Exception as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    wait = min(2 ** attempt, 30)
+                    print(f"TAVILY ERROR: {label} | {e} | retry in {wait}s (attempt {attempt + 1}/{max_attempts})")
+                    await asyncio.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
+
     @tool
     async def web_search(self, params: WebSearchInput) -> ToolOutput:
         """
         Search the web using Tavily. Returns search results with titles, URLs, and snippets.
         Use fetch_url tool to get full content from specific URLs if needed.
         """
-        try:
-            response = await self.tavily_client.search(
+        # Retry transient Tavily failures, then let a persistent one (e.g. exhausted
+        # quota) propagate. The SDK turns the raise into ToolFailed -> a clean
+        # terminal, rather than the agent looping on a dead search backend.
+        response = await self._tavily_with_retry(
+            f"search({params.query!r})",
+            lambda: self.tavily_client.search(
                 query=params.query,
                 search_depth="basic",
                 max_results=5,
-            )
+            ),
+        )
 
-            results = response.get("results", [])
-            if not results:
-                return ToolOutput(
-                    blocks=[TextBlock(text="No search results found.")],
-                    metadata={"query": params.query, "results": []},
-                    reward=0.0,
-                    finished=False,
-                )
-
-            display_parts = [f"Search results for: {params.query}\n"]
-            for i, result in enumerate(results, 1):
-                title = result.get("title", "No title")
-                url = result.get("url", "")
-                snippet = result.get("content", "")
-                display_parts.append(f"{i}. {title}\n   URL: {url}\n   {snippet}\n")
-
-            display_text = "\n".join(display_parts)
-
+        results = response.get("results", [])
+        if not results:
             return ToolOutput(
-                blocks=[TextBlock(text=display_text)],
-                metadata={
-                    "query": params.query,
-                    "results": results,
-                    "count": len(results),
-                },
+                blocks=[TextBlock(text="No search results found.")],
+                metadata={"query": params.query, "results": []},
                 reward=0.0,
                 finished=False,
             )
-        except Exception as e:
-            return ToolOutput(
-                blocks=[TextBlock(text=f"Web search failed: {str(e)}")],
-                metadata={"query": params.query, "error": str(e)},
-                reward=0.0,
-                finished=False,
-            )
+
+        display_parts = [f"Search results for: {params.query}\n"]
+        for i, result in enumerate(results, 1):
+            title = result.get("title", "No title")
+            url = result.get("url", "")
+            snippet = result.get("content", "")
+            display_parts.append(f"{i}. {title}\n   URL: {url}\n   {snippet}\n")
+
+        display_text = "\n".join(display_parts)
+
+        return ToolOutput(
+            blocks=[TextBlock(text=display_text)],
+            metadata={
+                "query": params.query,
+                "results": results,
+                "count": len(results),
+            },
+            reward=0.0,
+            finished=False,
+        )
 
     @tool
     async def fetch_url(self, params: FetchUrlInput) -> ToolOutput:
@@ -175,84 +195,82 @@ When you have your answer, submit it using the submit_answer tool."""
         """
         PAGE_SIZE = 10000  # Characters per page
 
-        try:
-            response = await self.tavily_client.extract(
+        # Retry transient Tavily failures, then let a persistent one (e.g. exhausted
+        # quota) propagate. The SDK turns the raise into ToolFailed -> a clean
+        # terminal, rather than the agent looping on a dead extract backend.
+        response = await self._tavily_with_retry(
+            f"extract({params.url!r})",
+            lambda: self.tavily_client.extract(
                 urls=[params.url],
                 extract_depth="advanced",
                 format="text",
-            )
+            ),
+        )
 
-            results = response.get("results", [])
-            if not results:
-                return ToolOutput(
-                    blocks=[TextBlock(text=(
-                        f"Could not fetch {params.url}: the extractor returned "
-                        f"no result. The URL may be unreachable, blocked, or "
-                        f"invalid. Try a different source, the publisher's "
-                        f"full-text page, or the arXiv HTML version "
-                        f"(arxiv.org/html/<id> rather than /abs/<id>)."
-                    ))],
-                    metadata={"url": params.url, "results": []},
-                    reward=0.0,
-                    finished=False,
-                )
-
-            raw_content = results[0].get("raw_content", "") or ""
-            if not raw_content.strip():
-                return ToolOutput(
-                    blocks=[TextBlock(text=(
-                        f"No readable text could be extracted from {params.url}. "
-                        f"The page appears to be JavaScript-gated (e.g. an arXiv "
-                        f"/abs/ abstract page or a paywalled publisher page) or "
-                        f"otherwise served no content to the extractor. Try the "
-                        f"article's full-text HTML version (e.g. arxiv.org/html/<id> "
-                        f"instead of /abs/<id>), an open-access mirror, or a "
-                        f"different source."
-                    ))],
-                    metadata={"url": params.url, "results": results, "empty_content": True},
-                    reward=0.0,
-                    finished=False,
-                )
-
-            total_length = len(raw_content)
-
-            # Calculate pagination
-            total_pages = max(1, (total_length + PAGE_SIZE - 1) // PAGE_SIZE)
-            page = max(1, min(params.page, total_pages))
-
-            # Extract the requested page
-            start_idx = (page - 1) * PAGE_SIZE
-            end_idx = min(start_idx + PAGE_SIZE, total_length)
-            page_content = raw_content[start_idx:end_idx]
-
-            # Build display text with pagination info
-            if total_pages == 1:
-                display_text = f"Content from {params.url}:\n\n{page_content}"
-            else:
-                display_text = f"Content from {params.url} (Page {page}/{total_pages}):\n\n{page_content}"
-                if page < total_pages:
-                    display_text += f"\n\n[Use fetch_url with page={page + 1} to see more content]"
-
+        results = response.get("results", [])
+        if not results:
             return ToolOutput(
-                blocks=[TextBlock(text=display_text)],
-                metadata={
-                    "url": params.url,
-                    "page": page,
-                    "total_pages": total_pages,
-                    "total_length": total_length,
-                    "page_start": start_idx,
-                    "page_end": end_idx,
-                },
+                blocks=[TextBlock(text=(
+                    f"Could not fetch {params.url}: the extractor returned "
+                    f"no result. The URL may be unreachable, blocked, or "
+                    f"invalid. Try a different source, the publisher's "
+                    f"full-text page, or the arXiv HTML version "
+                    f"(arxiv.org/html/<id> rather than /abs/<id>)."
+                ))],
+                metadata={"url": params.url, "results": []},
                 reward=0.0,
                 finished=False,
             )
-        except Exception as e:
+
+        raw_content = results[0].get("raw_content", "") or ""
+        if not raw_content.strip():
             return ToolOutput(
-                blocks=[TextBlock(text=f"Failed to fetch URL: {str(e)}")],
-                metadata={"url": params.url, "error": str(e)},
+                blocks=[TextBlock(text=(
+                    f"No readable text could be extracted from {params.url}. "
+                    f"The page appears to be JavaScript-gated (e.g. an arXiv "
+                    f"/abs/ abstract page or a paywalled publisher page) or "
+                    f"otherwise served no content to the extractor. Try the "
+                    f"article's full-text HTML version (e.g. arxiv.org/html/<id> "
+                    f"instead of /abs/<id>), an open-access mirror, or a "
+                    f"different source."
+                ))],
+                metadata={"url": params.url, "results": results, "empty_content": True},
                 reward=0.0,
                 finished=False,
             )
+
+        total_length = len(raw_content)
+
+        # Calculate pagination
+        total_pages = max(1, (total_length + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(1, min(params.page, total_pages))
+
+        # Extract the requested page
+        start_idx = (page - 1) * PAGE_SIZE
+        end_idx = min(start_idx + PAGE_SIZE, total_length)
+        page_content = raw_content[start_idx:end_idx]
+
+        # Build display text with pagination info
+        if total_pages == 1:
+            display_text = f"Content from {params.url}:\n\n{page_content}"
+        else:
+            display_text = f"Content from {params.url} (Page {page}/{total_pages}):\n\n{page_content}"
+            if page < total_pages:
+                display_text += f"\n\n[Use fetch_url with page={page + 1} to see more content]"
+
+        return ToolOutput(
+            blocks=[TextBlock(text=display_text)],
+            metadata={
+                "url": params.url,
+                "page": page,
+                "total_pages": total_pages,
+                "total_length": total_length,
+                "page_start": start_idx,
+                "page_end": end_idx,
+            },
+            reward=0.0,
+            finished=False,
+        )
 
     @tool
     async def submit_answer(self, params: SubmitAnswerInput) -> ToolOutput:
