@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pandas as pd
 import openai
 from pydantic import BaseModel, Field
@@ -324,27 +326,43 @@ Format:
 
 CORRECT or INCORRECT"""
 
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[{"role": "user", "content": grader_prompt}],
-            )
+        # Retry the LLM grader on transient failures, then let a persistent
+        # failure propagate. The SDK turns a raise into ToolFailed and ends the
+        # rollout cleanly, so a grader outage is never scored as an incorrect
+        # answer (which would corrupt the reward signal).
+        grading_response = await self._call_grader_with_retry(grader_prompt)
 
-            grading_response = response.choices[0].message.content or ""
+        upper_response = grading_response.upper()
+        is_correct = "CORRECT" in upper_response and "INCORRECT" not in upper_response
 
-            upper_response = grading_response.upper()
-            is_correct = "CORRECT" in upper_response and "INCORRECT" not in upper_response
+        reward = 1.0 if is_correct else 0.0
 
-            reward = 1.0 if is_correct else 0.0
+        return {
+            "is_correct": is_correct,
+            "justification": grading_response,
+            "reward": reward,
+        }
 
-            return {
-                "is_correct": is_correct,
-                "justification": grading_response,
-                "reward": reward,
-            }
-        except Exception as e:
-            return {
-                "is_correct": False,
-                "justification": f"Grading failed due to error: {str(e)}",
-                "reward": 0.0,
-            }
+    async def _call_grader_with_retry(self, grader_prompt: str, *, max_attempts: int = 4) -> str:
+        """Call the gpt-5-mini grader with exponential backoff.
+
+        Transient failures are retried; after ``max_attempts`` the last exception
+        re-raises so the tool fails loudly (the SDK turns the raise into ToolFailed
+        -> terminal) instead of swallowing the error into a fabricated reward.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-5-mini",
+                    messages=[{"role": "user", "content": grader_prompt}],
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                last_exc = e
+                if attempt < max_attempts - 1:
+                    wait = min(2 ** attempt, 30)
+                    print(f"GRADER API ERROR: gpt-5-mini | {e} | retry in {wait}s (attempt {attempt + 1}/{max_attempts})")
+                    await asyncio.sleep(wait)
+        assert last_exc is not None
+        raise last_exc
